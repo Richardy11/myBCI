@@ -1,4 +1,3 @@
-# gui_myo.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess, sys, os, json
@@ -28,10 +27,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Myo EMG (Always-On View / Calibrate / Train+Predict)")
-        self.geometry("780x560")
+        self.geometry("860x620")
 
         # 子进程
-        self.proc_run = None       # 始终用于 main.py 可视化
+        self.proc_run = None       # 一直开着的可视化
         self.proc_cal = None
         self.proc_train = None
         self.proc_pred = None
@@ -71,7 +70,6 @@ class App(tk.Tk):
 
     # -------------------- 小工具：暂停/恢复 Run --------------------
     def _pause_run_for_device(self):
-        """若 Run 正在占用设备，则先停掉，并标记稍后恢复。"""
         if self.proc_run and self.proc_run.poll() is None:
             try:
                 self.proc_run.terminate()
@@ -83,7 +81,6 @@ class App(tk.Tk):
             self._resume_run_after = False
 
     def _maybe_resume_run(self):
-        """根据标记恢复 Run。"""
         if self._resume_run_after:
             self._resume_run_after = False
             try:
@@ -92,7 +89,6 @@ class App(tk.Tk):
                 print("[RESUME RUN FAILED]", e)
 
     def _watch_pred_end(self):
-        """轮询等待 Predict 结束，然后自动恢复 Run。"""
         if self.proc_pred and self.proc_pred.poll() is None:
             self.after(500, self._watch_pred_end)
             return
@@ -117,6 +113,10 @@ class App(tk.Tk):
                 "step": self.step_var.get(),
                 "fftlen": self.fftlen_var.get(),
                 "usefft": self.usefft_var.get(),
+                # Level 相关
+                "smooth_alpha": self.level_alpha_var.get(),
+                "scales": self.scales_var.get(),
+                "print_hz": self.print_hz_var.get(),
             },
             "cal": {
                 "addr": self.c_addr_var.get(),
@@ -164,18 +164,23 @@ class App(tk.Tk):
         self.step_var.set(rcfg.get("step", 10))
         self.fftlen_var.set(rcfg.get("fftlen", 64))
         self.usefft_var.set(rcfg.get("usefft", True))
+        # Level
+        self.level_alpha_var.set(rcfg.get("smooth_alpha", 0.30))
+        self.scales_var.set(rcfg.get("scales", "1,1,1,1,1,1,1,1"))
+        self.print_hz_var.set(rcfg.get("print_hz", 20))
 
     def build_run_tab(self, parent):
         r = 0
         ttk.Label(parent, text="Myo 地址/UUID:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.addr_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.addr_var, width=46).grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Entry(parent, textvariable=self.addr_var, width=52).grid(row=r, column=1, columnspan=3, sticky="we", padx=8)
         r += 1
 
         ttk.Label(parent, text="显示模式:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.view_var = tk.StringVar()
-        ttk.Radiobutton(parent, text="Raw (8通道图)", variable=self.view_var, value="raw").grid(row=r, column=1, sticky="w")
+        ttk.Radiobutton(parent, text="Raw (8通道图)",   variable=self.view_var, value="raw").grid(row=r, column=1, sticky="w")
         ttk.Radiobutton(parent, text="Feat (特征计算)", variable=self.view_var, value="feat").grid(row=r, column=2, sticky="w")
+        ttk.Radiobutton(parent, text="Level (平滑强度)", variable=self.view_var, value="level").grid(row=r, column=3, sticky="w")
         r += 1
 
         ttk.Label(parent, text="Myo 数据模式:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
@@ -184,21 +189,38 @@ class App(tk.Tk):
         ttk.Radiobutton(parent, text="Raw",      variable=self.mode_var, value="raw").grid(row=r, column=2, sticky="w")
         r += 1
 
-        ttk.Label(parent, text="窗长 ms:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
+        # feat / raw 通用参数
+        ttk.Label(parent, text="窗长 ms / 步长 ms / FFT:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.win_var = tk.IntVar()
-        ttk.Entry(parent, textvariable=self.win_var, width=8).grid(row=r, column=1, sticky="w")
-        r += 1
-
-        ttk.Label(parent, text="步长 ms:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.step_var = tk.IntVar()
-        ttk.Entry(parent, textvariable=self.step_var, width=8).grid(row=r, column=1, sticky="w")
+        self.fftlen_var = tk.IntVar()
+        ttk.Entry(parent, textvariable=self.win_var, width=6).grid(row=r, column=1, sticky="w")
+        ttk.Entry(parent, textvariable=self.step_var, width=6).grid(row=r, column=1, padx=60, sticky="w")
+        ttk.Entry(parent, textvariable=self.fftlen_var, width=6).grid(row=r, column=1, padx=120, sticky="w")
+        self.usefft_var = tk.BooleanVar()
+        ttk.Checkbutton(parent, text="启用 FFT bands（feat）", variable=self.usefft_var).grid(row=r, column=2, sticky="w")
         r += 1
 
-        ttk.Label(parent, text="FFT 长度:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
-        self.fftlen_var = tk.IntVar()
-        ttk.Entry(parent, textvariable=self.fftlen_var, width=8).grid(row=r, column=1, sticky="w")
-        self.usefft_var = tk.BooleanVar()
-        ttk.Checkbutton(parent, text="启用频段能量 (FFT bands)", variable=self.usefft_var).grid(row=r, column=2, sticky="w")
+        # Level 模式参数
+        lf = ttk.LabelFrame(parent, text="Level 模式参数（整流 + EMA 平滑 + 通道缩放）")
+        rr = 0
+        ttk.Label(lf, text="EMA α (0~1):").grid(row=rr, column=0, sticky="e", padx=8, pady=6)
+        self.level_alpha_var = tk.DoubleVar()
+        ttk.Entry(lf, textvariable=self.level_alpha_var, width=8).grid(row=rr, column=1, sticky="w")
+        rr += 1
+
+        ttk.Label(lf, text="打印频率 (Hz):").grid(row=rr, column=0, sticky="e", padx=8, pady=6)
+        self.print_hz_var = tk.DoubleVar()
+        ttk.Entry(lf, textvariable=self.print_hz_var, width=8).grid(row=rr, column=1, sticky="w")
+        rr += 1
+
+        ttk.Label(lf, text="8通道 scaler（逗号分隔）:").grid(row=rr, column=0, sticky="e", padx=8, pady=6)
+        self.scales_var = tk.StringVar()
+        ttk.Entry(lf, textvariable=self.scales_var, width=40).grid(row=rr, column=1, columnspan=2, sticky="we", padx=8)
+        rr += 1
+
+        lf.grid_columnconfigure(1, weight=1)
+        lf.grid(row=r, column=0, columnspan=4, sticky="we", padx=8, pady=4)
         r += 1
 
         ttk.Button(parent, text="重启视图窗口", command=self._restart_view).grid(row=r, column=1, pady=12)
@@ -207,23 +229,33 @@ class App(tk.Tk):
 
         parent.grid_columnconfigure(1, weight=1)
         parent.grid_columnconfigure(2, weight=1)
+        parent.grid_columnconfigure(3, weight=1)
 
     def _start_always_on_view(self):
-        """启动一个只显示 EMG 数据的 main.py 窗口（如已在运行则跳过）"""
+        """启动一个只显示 EMG 数据的 main_myo_run.py 窗口（如已在运行则跳过）"""
         if self.proc_run and self.proc_run.poll() is None:
             return
         addr = (self.addr_var.get() or MYO_ADDR_DEFAULT).strip()
+        view = self.view_var.get()
         cmd = [
-            sys.executable, os.path.join(MYOCODE_DIR, "main.py"),
+            sys.executable, os.path.join(MYOCODE_DIR, "main_myo_run.py"),
             "--addr", addr,
             "--mode", self.mode_var.get(),
-            "--view", self.view_var.get(),
+            "--view", view,
             "--win", str(self.win_var.get() or 200),
             "--step", str(self.step_var.get() or 10),
             "--fftlen", str(self.fftlen_var.get() or 64),
         ]
         if not self.usefft_var.get():
             cmd.append("--no-fft")
+
+        # Level 模式追加参数
+        if view == "level":
+            cmd += [
+                "--smooth-alpha", str(self.level_alpha_var.get() or 0.30),
+                "--scales", self.scales_var.get() or "1,1,1,1,1,1,1,1",
+                "--print-hz", str(self.print_hz_var.get() or 20),
+            ]
         try:
             self.proc_run = subprocess.Popen(cmd)
             self._save_config()
@@ -271,7 +303,7 @@ class App(tk.Tk):
         r = 0
         ttk.Label(parent, text="Myo 地址/UUID:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.c_addr_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.c_addr_var, width=46).grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Entry(parent, textvariable=self.c_addr_var, width=52).grid(row=r, column=1, columnspan=3, sticky="we", padx=8)
         r += 1
 
         ttk.Label(parent, text="Myo 数据模式:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
@@ -287,27 +319,21 @@ class App(tk.Tk):
 
         ttk.Label(parent, text="动作列表 (逗号分隔):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.actions_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.actions_var, width=40).grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Entry(parent, textvariable=self.actions_var, width=46).grid(row=r, column=1, columnspan=3, sticky="we", padx=8)
         r += 1
 
-        ttk.Label(parent, text="Trials:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
+        ttk.Label(parent, text="Trials / Hold(s) / Rest(s):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.trials_var = tk.IntVar()
-        ttk.Entry(parent, textvariable=self.trials_var, width=8).grid(row=r, column=1, sticky="w")
-        r += 1
-
-        ttk.Label(parent, text="Hold 秒:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.hold_var = tk.DoubleVar()
-        ttk.Entry(parent, textvariable=self.hold_var, width=8).grid(row=r, column=1, sticky="w")
-        r += 1
-
-        ttk.Label(parent, text="Rest 秒:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.rest_var = tk.DoubleVar()
-        ttk.Entry(parent, textvariable=self.rest_var, width=8).grid(row=r, column=1, sticky="w")
+        ttk.Entry(parent, textvariable=self.trials_var, width=6).grid(row=r, column=1, sticky="w")
+        ttk.Entry(parent, textvariable=self.hold_var, width=6).grid(row=r, column=1, padx=60, sticky="w")
+        ttk.Entry(parent, textvariable=self.rest_var, width=6).grid(row=r, column=1, padx=120, sticky="w")
         r += 1
 
         ttk.Label(parent, text="输出目录:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.outdir_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.outdir_var, width=40).grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Entry(parent, textvariable=self.outdir_var, width=46).grid(row=r, column=1, columnspan=3, sticky="we", padx=8)
         r += 1
 
         self.savefeat_var = tk.BooleanVar()
@@ -341,11 +367,11 @@ class App(tk.Tk):
 
         parent.grid_columnconfigure(1, weight=1)
         parent.grid_columnconfigure(2, weight=1)
+        parent.grid_columnconfigure(3, weight=1)
 
         self.apply_cal_cfg(ccfg)
 
     def on_start_cal(self):
-        # Calibrate 需要独占设备 → 暂停视图
         self._pause_run_for_device()
 
         if any(p and p.poll() is None for p in (self.proc_train, self.proc_pred)):
@@ -403,10 +429,8 @@ class App(tk.Tk):
             self._maybe_resume_run()
             return
 
-        # 启动训练（用 Train & Predict 页配置）
         self._start_train_with_mat(mat_path)
 
-        # 若未开启自动管线（只做 Calibrate），此处恢复视图
         if not self.auto_pipe_var.get():
             self._maybe_resume_run()
 
@@ -421,9 +445,8 @@ class App(tk.Tk):
 
     # -------------------- Train & Predict tab --------------------
     def apply_train_cfg(self, tcfg: dict):
-        # Train
-        self.t_algo_var.set(tcfg.get("algo", "logreg"))              # RLDA/LDA/SVM/RF/logreg
-        self.t_use_saved_var.set(tcfg.get("use_saved_feat", True))   # True-> --use-feat
+        self.t_algo_var.set(tcfg.get("algo", "logreg"))
+        self.t_use_saved_var.set(tcfg.get("use_saved_feat", True))
         self.t_model_out_var.set(tcfg.get("model_out", os.path.join(THIS_DIR, "myocode", "models", "model_subj1.pkl")))
         self.t_win_var.set(tcfg.get("recalc_win", 200))
         self.t_step_var.set(tcfg.get("recalc_step", 10))
@@ -461,9 +484,9 @@ class App(tk.Tk):
 
         ttk.Label(lf1, text="模型输出:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.t_model_out_var = tk.StringVar()
-        out_entry = ttk.Entry(lf1, textvariable=self.t_model_out_var, width=46)
-        out_entry.grid(row=r, column=1, sticky="we", padx=8)
-        ttk.Button(lf1, text="保存到…", command=self._browse_model_out).grid(row=r, column=2, sticky="w")
+        out_entry = ttk.Entry(lf1, textvariable=self.t_model_out_var, width=52)
+        out_entry.grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Button(lf1, text="保存到…", command=self._browse_model_out).grid(row=r, column=3, sticky="w")
         r += 1
 
         ttk.Button(lf1, text="Start Train (使用 Calibrate 输出)", command=self.on_start_train).grid(row=r, column=1, pady=8)
@@ -471,14 +494,14 @@ class App(tk.Tk):
         lf1.grid_columnconfigure(1, weight=1)
         lf1.pack(fill="x", padx=8, pady=8)
 
-        # ------- Predict（精简：不再显示地址/UUID） -------
+        # ------- Predict（精简：不再显示地址/UUID，复用 Run 地址） -------
         lf2 = ttk.LabelFrame(parent, text="Predict")
         r = 0
         ttk.Label(lf2, text="模型文件:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
         self.model_path_var = tk.StringVar()
-        m_entry = ttk.Entry(lf2, textvariable=self.model_path_var, width=46)
-        m_entry.grid(row=r, column=1, sticky="we", padx=8)
-        ttk.Button(lf2, text="选择文件…", command=self._browse_model).grid(row=r, column=2, sticky="w")
+        m_entry = ttk.Entry(lf2, textvariable=self.model_path_var, width=52)
+        m_entry.grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Button(lf2, text="选择文件…", command=self._browse_model).grid(row=r, column=3, sticky="w")
         r += 1
 
         ttk.Label(lf2, text="Myo 数据模式:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
@@ -497,7 +520,6 @@ class App(tk.Tk):
         lf2.grid_columnconfigure(1, weight=1)
         lf2.pack(fill="x", padx=8, pady=8)
 
-        # 应用配置
         self.apply_train_cfg(tcfg)
         self.apply_pred_cfg(pcfg)
 
@@ -509,7 +531,6 @@ class App(tk.Tk):
         )
         if f:
             self.t_model_out_var.set(f)
-            # 同步到 Predict 页默认
             self.model_path_var.set(f)
             self._save_config()
 
@@ -550,7 +571,6 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("启动失败", str(e))
 
-    # 供自动管线调用：已知 mat 路径
     def _start_train_with_mat(self, mat_path: str):
         if self.proc_train and self.proc_train.poll() is None:
             return
@@ -572,7 +592,6 @@ class App(tk.Tk):
 
         try:
             self.proc_train = subprocess.Popen(cmd)
-            # 训练结束后自动预测
             self._watch_train_then_predict(self.t_model_out_var.get().strip())
         except Exception as e:
             messagebox.showerror("启动训练失败", str(e))
@@ -601,7 +620,6 @@ class App(tk.Tk):
             self._save_config()
 
     def on_start_pred(self):
-        # Predict 需要独占设备 → 暂停视图
         self._pause_run_for_device()
 
         if any(p and p.poll() is None for p in (self.proc_cal, self.proc_train)):
@@ -617,7 +635,6 @@ class App(tk.Tk):
             self._maybe_resume_run()
             return
 
-        # 复用 Run 页地址/模式
         addr_for_pred = (self.addr_var.get() or MYO_ADDR_DEFAULT).strip()
         mode_for_pred = self.pred_mode_var.get()
 
@@ -631,7 +648,6 @@ class App(tk.Tk):
         try:
             self.proc_pred = subprocess.Popen(cmd)
             self._save_config()
-            # 监视 Predict 结束后自动恢复 Run
             self._watch_pred_end()
             messagebox.showinfo("已启动", "Predict 子进程已启动。终端会打印预测结果。")
         except Exception as e:
@@ -661,7 +677,6 @@ class App(tk.Tk):
             messagebox.showwarning("提示", f"未找到训练输出模型：\n{model_path}")
             self._maybe_resume_run()
             return
-        # 自动启动预测（使用 Predict 区域参数，复用 Run 地址）
         self.model_path_var.set(model_path)
         self.on_start_pred()
 
