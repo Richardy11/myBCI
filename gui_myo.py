@@ -62,20 +62,56 @@ class App(tk.Tk):
         self.apply_train_cfg(self.cfg.get("train", {}))
         self.apply_pred_cfg(self.cfg.get("pred", {}))
 
-        # 启动「一直开着」的 EMG 可视化
-        self.after(100, self._start_always_on_view)
+        # 不再自动启动「一直开着」的 EMG 可视化（改为手动点击按钮启动）
 
         # 关闭事件
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # 常量：动作选择（REST 总是自动包含，不在复选项中显示）
+    ACTION_CHOICES = ["OPEN", "CLOSE", "PALMUP", "PALMDOWN", "INDEX"]
+
+    # -------------------- 通用子进程/参数工具 --------------------
+    def _spawn_subprocess(self, cmd: list[str]) -> subprocess.Popen:
+        """统一的子进程启动（便于后续加日志/工作目录/平台差异设置）。"""
+        return subprocess.Popen(cmd, start_new_session=True, close_fds=True)
+
+    def _terminate_proc_silent(self, attr_name: str):
+        """静默终止指定属性的子进程（若存在且在运行）。"""
+        proc = getattr(self, attr_name, None)
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        setattr(self, attr_name, None)
+
+    def _stop_proc_with_info(self, attr_name: str, stopped_msg: str, not_running_msg: str) -> bool:
+        """带消息的停止动作，返回是否确实停止了一个正在运行的进程。"""
+        proc = getattr(self, attr_name, None)
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            setattr(self, attr_name, None)
+            messagebox.showinfo("已停止", stopped_msg)
+            return True
+        else:
+            messagebox.showinfo("提示", not_running_msg)
+            return False
+
+    @staticmethod
+    def _extend_cmd_with_win_fft(cmd: list[str], win: int, step: int, fftlen: int, usefft: bool) -> list[str]:
+        """追加统一的窗口/步长/FFT 参数；当未启用 FFT 时追加 "--no-fft"。"""
+        cmd += ["--win", str(win), "--step", str(step), "--fftlen", str(fftlen)]
+        if not usefft:
+            cmd.append("--no-fft")
+        return cmd
+
     # -------------------- 小工具：暂停/恢复 Run --------------------
     def _pause_run_for_device(self):
         if self.proc_run and self.proc_run.poll() is None:
-            try:
-                self.proc_run.terminate()
-            except Exception:
-                pass
-            self.proc_run = None
+            self._terminate_proc_silent("proc_run")
             self._resume_run_after = True
         else:
             self._resume_run_after = False
@@ -87,6 +123,13 @@ class App(tk.Tk):
                 self._start_always_on_view()
             except Exception as e:
                 print("[RESUME RUN FAILED]", e)
+
+    # -------------------- 工具：从复选框生成动作字符串 --------------------
+    def _get_selected_actions_str(self) -> str:
+        """生成 'REST,OPEN,...' 字符串；REST 总是包含；按固定顺序输出。"""
+        selected = [a for a in self.ACTION_CHOICES if self.action_vars.get(a) and self.action_vars[a].get()]
+        parts = ["REST"] + selected
+        return ",".join(parts)
 
     def _watch_pred_end(self):
         if self.proc_pred and self.proc_pred.poll() is None:
@@ -122,7 +165,7 @@ class App(tk.Tk):
                 "addr": self.c_addr_var.get(),
                 "mode": self.c_mode_var.get(),
                 "subject": self.subj_var.get(),
-                "actions": self.actions_var.get(),
+                "actions": self._get_selected_actions_str(),
                 "trials": self.trials_var.get(),
                 "hold": float(self.hold_var.get()),
                 "rest": float(self.rest_var.get()),
@@ -242,12 +285,14 @@ class App(tk.Tk):
             "--addr", addr,
             "--mode", self.mode_var.get(),
             "--view", view,
-            "--win", str(self.win_var.get() or 200),
-            "--step", str(self.step_var.get() or 10),
-            "--fftlen", str(self.fftlen_var.get() or 64),
         ]
-        if not self.usefft_var.get():
-            cmd.append("--no-fft")
+        self._extend_cmd_with_win_fft(
+            cmd,
+            self.win_var.get() or 200,
+            self.step_var.get() or 10,
+            self.fftlen_var.get() or 64,
+            self.usefft_var.get(),
+        )
 
         # Level 模式追加参数
         if view == "level":
@@ -257,7 +302,7 @@ class App(tk.Tk):
                 "--print-hz", str(self.print_hz_var.get() or 20),
             ]
         try:
-            self.proc_run = subprocess.Popen(cmd)
+            self.proc_run = self._spawn_subprocess(cmd)
             self._save_config()
         except Exception as e:
             messagebox.showerror("视图启动失败", str(e))
@@ -265,27 +310,25 @@ class App(tk.Tk):
     def _restart_view(self):
         """手动重启视图窗口（修改了参数想立即生效时用）"""
         if self.proc_run and self.proc_run.poll() is None:
-            try:
-                self.proc_run.terminate()
-            except Exception:
-                pass
-            self.proc_run = None
+            self._terminate_proc_silent("proc_run")
         self._start_always_on_view()
 
     def on_stop_run(self):
-        if self.proc_run and self.proc_run.poll() is None:
-            self.proc_run.terminate()
-            self.proc_run = None
-            messagebox.showinfo("已停止", "视图窗口已关闭。")
-        else:
-            messagebox.showinfo("提示", "视图窗口当前未在运行。")
+        self._stop_proc_with_info("proc_run", "视图窗口已关闭。", "视图窗口当前未在运行。")
 
     # -------------------- Calibrate tab --------------------
     def apply_cal_cfg(self, ccfg: dict):
         self.c_addr_var.set(ccfg.get("addr", MYO_ADDR_DEFAULT))
         self.c_mode_var.set(ccfg.get("mode", "filtered"))
         self.subj_var.set(ccfg.get("subject", "1"))
-        self.actions_var.set(ccfg.get("actions", "REST,OPEN,CLOSE"))
+        # 解析已保存的动作字符串，设置复选框
+        saved_actions = str(ccfg.get("actions", "REST,OPEN,CLOSE")).upper()
+        chosen = {a.strip() for a in saved_actions.split(',') if a.strip()}
+        # REST 总是默认包含，不用勾
+        for a in self.ACTION_CHOICES:
+            var = self.action_vars.get(a)
+            if var is not None:
+                var.set(a in chosen)
         self.trials_var.set(ccfg.get("trials", 3))
         self.hold_var.set(ccfg.get("hold", 3.0))
         self.rest_var.set(ccfg.get("rest", 2.0))
@@ -317,9 +360,17 @@ class App(tk.Tk):
         ttk.Entry(parent, textvariable=self.subj_var, width=10).grid(row=r, column=1, sticky="w")
         r += 1
 
-        ttk.Label(parent, text="动作列表 (逗号分隔):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
-        self.actions_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.actions_var, width=46).grid(row=r, column=1, columnspan=3, sticky="we", padx=8)
+        ttk.Label(parent, text="选择动作 (自动包含 REST):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
+        # 动作复选框：OPEN/CLOSE/PALMUP/PALMDOWN/INDEX
+        self.action_vars = {}
+        c_frame = ttk.Frame(parent)
+        c_frame.grid(row=r, column=1, columnspan=3, sticky="w", padx=8)
+        c = 0
+        for a in self.ACTION_CHOICES:
+            var = tk.BooleanVar(value=(a in ["OPEN","CLOSE"]))
+            self.action_vars[a] = var
+            ttk.Checkbutton(c_frame, text=a, variable=var).grid(row=0, column=c, sticky="w", padx=(0,8))
+            c += 1
         r += 1
 
         ttk.Label(parent, text="Trials / Hold(s) / Rest(s):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
@@ -383,12 +434,19 @@ class App(tk.Tk):
 
         outdir = self.outdir_var.get().strip()
         os.makedirs(outdir, exist_ok=True)
+        # 由复选框生成动作字符串（自动包含 REST，至少要有一个动作被勾选）
+        actions_str = self._get_selected_actions_str()
+        if actions_str.strip() == "REST":
+            messagebox.showerror("错误", "请至少勾选一个非 REST 的动作。")
+            self._maybe_resume_run()
+            return
+
         cmd = [
             sys.executable, os.path.join(MYOCODE_DIR, "calibrate.py"),
             "--addr", self.c_addr_var.get().strip(),
             "--mode", self.c_mode_var.get(),
             "--subject", self.subj_var.get().strip(),
-            "--actions", self.actions_var.get().strip(),
+            "--actions", actions_str,
             "--trials", str(self.trials_var.get()),
             "--hold", str(self.hold_var.get()),
             "--rest", str(self.rest_var.get()),
@@ -397,14 +455,16 @@ class App(tk.Tk):
         ]
         if self.savefeat_var.get():
             cmd.append("--save-feat")
-            cmd += ["--win", str(self.c_win_var.get()),
-                    "--step", str(self.c_step_var.get()),
-                    "--fftlen", str(self.c_fftlen_var.get())]
-            if not self.c_usefft_var.get():
-                cmd.append("--no-fft")
+            self._extend_cmd_with_win_fft(
+                cmd,
+                self.c_win_var.get(),
+                self.c_step_var.get(),
+                self.c_fftlen_var.get(),
+                self.c_usefft_var.get(),
+            )
 
         try:
-            self.proc_cal = subprocess.Popen(cmd)
+            self.proc_cal = self._spawn_subprocess(cmd)
             self._save_config()
             messagebox.showinfo("已启动", "Calibrate 子进程已启动。可在终端查看进度。")
             if self.auto_pipe_var.get():
@@ -435,13 +495,9 @@ class App(tk.Tk):
             self._maybe_resume_run()
 
     def on_stop_cal(self):
-        if self.proc_cal and self.proc_cal.poll() is None:
-            self.proc_cal.terminate()
-            self.proc_cal = None
-            messagebox.showinfo("已停止", "Calibrate 子进程已终止。")
+        did_stop = self._stop_proc_with_info("proc_cal", "Calibrate 子进程已终止。", "Calibrate 当前未在运行。")
+        if did_stop:
             self._maybe_resume_run()
-        else:
-            messagebox.showinfo("提示", "Calibrate 当前未在运行。")
 
     # -------------------- Train & Predict tab --------------------
     def apply_train_cfg(self, tcfg: dict):
@@ -515,6 +571,19 @@ class App(tk.Tk):
         ttk.Entry(lf2, textvariable=self.smoothk_var, width=8).grid(row=r, column=1, sticky="w")
         r += 1
 
+        # 旧数据 .mat（用于保持其他类，和混合/替换）
+        ttk.Label(lf2, text="旧数据 .mat:").grid(row=r, column=0, sticky="e", padx=8, pady=6)
+        self.old_mat_var = tk.StringVar()
+        old_entry = ttk.Entry(lf2, textvariable=self.old_mat_var, width=52)
+        old_entry.grid(row=r, column=1, columnspan=2, sticky="we", padx=8)
+        ttk.Button(lf2, text="选择…", command=self._browse_old_mat).grid(row=r, column=3, sticky="w")
+        r += 1
+
+        ttk.Label(lf2, text="最大录制秒数(缓冲):").grid(row=r, column=0, sticky="e", padx=8, pady=6)
+        self.adapt_max_sec_var = tk.DoubleVar(value=5.0)
+        ttk.Entry(lf2, textvariable=self.adapt_max_sec_var, width=8).grid(row=r, column=1, sticky="w")
+        r += 1
+
         ttk.Button(lf2, text="Start Predict", command=self.on_start_pred).grid(row=r, column=1, pady=8)
         ttk.Button(lf2, text="Stop",          command=self.on_stop_pred).grid(row=r, column=2)
         lf2.grid_columnconfigure(1, weight=1)
@@ -548,24 +617,29 @@ class App(tk.Tk):
             messagebox.showerror("错误", f"未找到 Calibrate 输出：\n{mat}")
             return
 
+        # Train 使用与 Calibrate 相同的动作集合
+        actions_str = self._get_selected_actions_str()
+
         cmd = [
             sys.executable, os.path.join(MYOCODE_DIR, "train_classifier.py"),
             "--mat", mat,
-            "--actions", self.actions_var.get().strip(),
+            "--actions", actions_str,
             "--clf", self.t_algo_var.get(),
             "--model-out", self.t_model_out_var.get().strip(),
         ]
         if self.t_use_saved_var.get():
             cmd.append("--use-feat")
         else:
-            cmd += ["--win", str(self.t_win_var.get()),
-                    "--step", str(self.t_step_var.get()),
-                    "--fftlen", str(self.t_fftlen_var.get())]
-            if not self.t_usefft_var.get():
-                cmd.append("--no-fft")
+            self._extend_cmd_with_win_fft(
+                cmd,
+                self.t_win_var.get(),
+                self.t_step_var.get(),
+                self.t_fftlen_var.get(),
+                self.t_usefft_var.get(),
+            )
 
         try:
-            self.proc_train = subprocess.Popen(cmd)
+            self.proc_train = self._spawn_subprocess(cmd)
             self._save_config()
             messagebox.showinfo("已启动", "Train 子进程已启动。请在终端观察训练日志。")
         except Exception as e:
@@ -574,35 +648,34 @@ class App(tk.Tk):
     def _start_train_with_mat(self, mat_path: str):
         if self.proc_train and self.proc_train.poll() is None:
             return
+        actions_str = self._get_selected_actions_str()
+
         cmd = [
             sys.executable, os.path.join(MYOCODE_DIR, "train_classifier.py"),
             "--mat", mat_path,
-            "--actions", self.actions_var.get().strip(),
+            "--actions", actions_str,
             "--clf", self.t_algo_var.get(),
             "--model-out", self.t_model_out_var.get().strip(),
         ]
         if self.t_use_saved_var.get():
             cmd.append("--use-feat")
         else:
-            cmd += ["--win", str(self.t_win_var.get()),
-                    "--step", str(self.t_step_var.get()),
-                    "--fftlen", str(self.t_fftlen_var.get())]
-            if not self.t_usefft_var.get():
-                cmd.append("--no-fft")
+            self._extend_cmd_with_win_fft(
+                cmd,
+                self.t_win_var.get(),
+                self.t_step_var.get(),
+                self.t_fftlen_var.get(),
+                self.t_usefft_var.get(),
+            )
 
         try:
-            self.proc_train = subprocess.Popen(cmd)
+            self.proc_train = self._spawn_subprocess(cmd)
             self._watch_train_then_predict(self.t_model_out_var.get().strip())
         except Exception as e:
             messagebox.showerror("启动训练失败", str(e))
 
     def on_stop_train(self):
-        if self.proc_train and self.proc_train.poll() is None:
-            self.proc_train.terminate()
-            self.proc_train = None
-            messagebox.showinfo("已停止", "Train 子进程已终止。")
-        else:
-            messagebox.showinfo("提示", "Train 当前未在运行。")
+        self._stop_proc_with_info("proc_train", "Train 子进程已终止。", "Train 当前未在运行。")
 
     # -------------------- Predict（精简地址：复用 Run 页地址） --------------------
     def apply_pred_cfg(self, pcfg: dict):
@@ -617,6 +690,15 @@ class App(tk.Tk):
         )
         if f:
             self.model_path_var.set(f)
+            self._save_config()
+
+    def _browse_old_mat(self):
+        f = filedialog.askopenfilename(
+            initialdir=os.path.dirname(self.old_mat_var.get() or os.path.join(THIS_DIR,"data")),
+            filetypes=[("MAT File","*.mat"),("All Files","*.*")]
+        )
+        if f:
+            self.old_mat_var.set(f)
             self._save_config()
 
     def on_start_pred(self):
@@ -638,15 +720,29 @@ class App(tk.Tk):
         addr_for_pred = (self.addr_var.get() or MYO_ADDR_DEFAULT).strip()
         mode_for_pred = self.pred_mode_var.get()
 
+        # 如果未手动选择旧 .mat，则尝试用 Calibrate 页的输出目录+subject 自动推断
+        if not self.old_mat_var.get().strip():
+            try:
+                auto_mat = _calib_mat_path(self.outdir_var.get().strip(), self.subj_var.get().strip())
+                if os.path.isfile(auto_mat):
+                    self.old_mat_var.set(auto_mat)
+            except Exception:
+                pass
+
         cmd = [
             sys.executable, os.path.join(MYOCODE_DIR, "run_classifier.py"),
             "--model", model,
             "--addr", addr_for_pred,
             "--mode", mode_for_pred,
-            "--smooth-k", str(self.smoothk_var.get())
+            "--smooth-k", str(self.smoothk_var.get()),
+            "--show-gui"
         ]
+        if self.old_mat_var.get().strip():
+            cmd += ["--old-mat", self.old_mat_var.get().strip(), "--old-use-feat"]
+        if self.adapt_max_sec_var.get():
+            cmd += ["--adapt-max-sec", str(self.adapt_max_sec_var.get())]
         try:
-            self.proc_pred = subprocess.Popen(cmd)
+            self.proc_pred = self._spawn_subprocess(cmd)
             self._save_config()
             self._watch_pred_end()
             messagebox.showinfo("已启动", "Predict 子进程已启动。终端会打印预测结果。")
@@ -655,13 +751,9 @@ class App(tk.Tk):
             self._maybe_resume_run()
 
     def on_stop_pred(self):
-        if self.proc_pred and self.proc_pred.poll() is None:
-            self.proc_pred.terminate()
-            self.proc_pred = None
-            messagebox.showinfo("已停止", "Predict 子进程已终止。")
+        did_stop = self._stop_proc_with_info("proc_pred", "Predict 子进程已终止。", "Predict 当前未在运行。")
+        if did_stop:
             self._maybe_resume_run()
-        else:
-            messagebox.showinfo("提示", "Predict 当前未在运行。")
 
     def _watch_train_then_predict(self, model_path: str):
         if self.proc_train and self.proc_train.poll() is None:
@@ -686,12 +778,8 @@ class App(tk.Tk):
             self._save_config()
         except Exception:
             pass
-        for p in (self.proc_run, self.proc_cal, self.proc_train, self.proc_pred):
-            if p and p.poll() is None:
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
+        for attr in ("proc_run", "proc_cal", "proc_train", "proc_pred"):
+            self._terminate_proc_silent(attr)
         self.destroy()
 
 if __name__ == "__main__":
