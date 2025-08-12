@@ -100,7 +100,7 @@ async def amain(args):
         elif args.view == "feat":
             await run_feat(addr=args.addr, mode=args.mode,
                            srate=200, win_ms=args.win, step_ms=args.step,
-                           use_fft=(not args.no-fft), fftlen=args.fftlen)
+                           use_fft=(not args.no_fft), fftlen=args.fftlen)
         elif args.view == "level":
             await run_level(addr=args.addr, mode=args.mode,
                             alpha=args.smooth_alpha, scales_str=args.scales, _print_hz_ignored=args.print_hz)
